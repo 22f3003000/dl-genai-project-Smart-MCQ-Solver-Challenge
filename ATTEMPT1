@@ -1,1 +1,70 @@
+import pandas as pd
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
+print("Initializing Baseline Submission Engine...")
+
+# 1. Load the actual Kaggle Competition Datasets
+TRAIN_PATH = '/kaggle/input/competitions/smart-mcq-solver-challenge/train.csv'
+TEST_PATH = '/kaggle/input/competitions/smart-mcq-solver-challenge/test.csv'
+
+df_train = pd.read_csv(TRAIN_PATH)
+df_test = pd.read_csv(TEST_PATH)
+
+# Clean missing string values to avoid vectorizer errors
+for col in ['prompt', 'A', 'B', 'C', 'D', 'E']:
+    df_train[col] = df_train[col].fillna("").astype(str)
+    df_test[col] = df_test[col].fillna("").astype(str)
+
+# 2. Build the TF-IDF Vocabulary over both Train and Test to capture all words
+corpus = []
+for df in [df_train, df_test]:
+    for col in ['prompt', 'A', 'B', 'C', 'D', 'E']:
+        corpus.extend(df[col].tolist())
+
+vectorizer = TfidfVectorizer(stop_words='english')
+vectorizer.fit(corpus)
+print(f"TF-IDF fitted with a vocabulary size of: {len(vectorizer.vocabulary_)} words.")
+
+# 3. Predict on the Test Set using Cosine Similarity
+options = ['A', 'B', 'C', 'D', 'E']
+test_preds = []
+
+print(f"Processing similarity rankings for {len(df_test)} test rows...")
+for idx, row in df_test.iterrows():
+    # Transform the question prompt
+    p_vector = vectorizer.transform([row['prompt']])
+    
+    # Calculate similarity score for each option
+    similarities = []
+    for opt in options:
+        opt_vector = vectorizer.transform([row[opt]])
+        sim_score = cosine_similarity(p_vector, opt_vector)[0][0]
+        similarities.append((opt, sim_score))
+    
+    # Sort options from highest similarity score to lowest
+    similarities.sort(key=lambda x: x[1], reverse=True)
+    
+    # Extract the top 3 best matching answer letters
+    top_3_preds = [x[0] for x in similarities[:3]]
+    
+    # Format exactly as required by the competition: space-separated labels (e.g., "A B C")
+    test_preds.append(" ".join(top_3_preds))
+
+# 4. Assemble the Final Submission DataFrame
+id_col = 'id' if 'id' in df_test.columns else 'ID'
+
+submission_df = pd.DataFrame({
+    'ID': df_test[id_col],
+    'Prediction': test_preds
+})
+
+# Save output to the current working directory as required by Kaggle
+submission_df.to_csv('submission.csv', index=False)
+
+print("\n=== BASELINE SUBMISSION FILE GENERATED ===")
+print(f"File saved to: /kaggle/working/submission.csv")
+print(f"Total Rows: {len(submission_df)}")
+print("\nPreview of the generated submission:")
+print(submission_df.head())
