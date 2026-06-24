@@ -1,206 +1,45 @@
-# Introduction to DL and GenAI Project [BSDA2001P] – Repository Guidelines
+# Smart MCQ Solver Challenge
 
-Welcome to the official project repository template.
+An intelligent multiple-choice question-answering system developed for the Kaggle challenge. This system leverages advanced Natural Language Processing (NLP), Large Language Models (LLMs), and strategic answer ranking to predict and rank the top three most probable correct answers for complex multiple-choice questions.
 
-This document defines the mandatory Git workflow and repository structure that must be followed throughout the course. These guidelines form part of the evaluation criteria.
-
----
-
-## Purpose of This Structure
-
-This repository structure ensures:
-
-- Clear milestone-wise progress tracking  
-- Proper version control practices  
-- Transparent academic evaluation  
-- Reproducibility of work  
-- Professional software engineering discipline  
+**Author:** [Debmalya Sanyal]  
+**Student/Participant ID:** [22f3003000]  
 
 ---
 
-## Branching Strategy (Mandatory)
+## 📌 Project Overview
+Multiple-choice question answering serves as a critical benchmark for evaluating reasoning, language understanding, and answer-ranking capabilities in modern AI systems. In this competition, models are tasked with handling challenging MCQ-style questions. Each question includes a prompt and five potential choices (`A`, `B`, `C`, `D`, and `E`). 
 
-### 1. Main Branch (`main`)
+The objective is to predict the top **three** most probable correct answers for each question, ranked by confidence.
 
-The `main` branch must always contain:
-
-- Latest working notebook  
-- Final training script  
-- Final inference script  
-- Updated reports  
-- README file  
-- Any deployment or utility scripts  
-
-The `main` branch should always represent the most stable and updated version of your project.
+### Evaluation Metric
+Submissions are evaluated using **Mean Average Precision at 3 (MAP@3)**. This metric highly rewards models that place the true correct answer higher up in their top-3 predicted list:
+- `A B C` $\rightarrow$ **Highest Score** (Correct answer is the 1st choice)
+- `B A C` $\rightarrow$ **Lower Score** (Correct answer is the 2nd choice)
+- `C D A` $\rightarrow$ **Lowest Score** (Correct answer is the 3rd choice)
 
 ---
 
-### 2. Milestone Branches (Strict Requirement)
+## 📂 Project Repository Structure
 
-For every milestone, you must:
-
-1. Create a new branch.  
-2. Perform all milestone-related work inside that branch.  
-3. Commit milestone-specific code only in that branch.  
-4. Push the branch to the remote repository.  
-
-#### Branch Naming Convention
-
-Use the following format:
-
-```
-milestone-1
-milestone-2
-milestone-3
-```
-
-Example:
-
-```bash
-git checkout -b milestone-1
-```
-
----
-
-## Strict Rules
-
-### Do Not Delete Milestone Branches
-
-Even after merging into `main`, milestone branches must remain in the repository for:
-
-- Evaluation  
-- Progress tracking  
-- Audit purposes  
-
-Deleting milestone branches will lead to penalties.
-
-### Do Not Commit Milestone Work Directly to `main`
-
-All milestone development must first happen inside the corresponding milestone branch.
-
----
-
-## Recommended Workflow
-
-### Step 1: Create a Milestone Branch
-
-```bash
-git checkout main
-git pull origin main
-git checkout -b milestone-1
-```
-
-### Step 2: Work on the Milestone
-
-- Add notebooks  
-- Add scripts  
-- Add documentation  
-- Commit regularly  
-
-```bash
-git add .
-git commit -m "Milestone 1: Completed data preprocessing and EDA"
-```
-
-### Step 3: Push the Branch
-
-```bash
-git push origin milestone-1
-```
-
-### Step 4: Merge into Main (After Completion)
-
-Once the milestone is complete:
-
-```bash
-git checkout main
-git merge milestone-1
-git push origin main
-```
-
-Do not delete the milestone branch after merging.
-
----
-
-## Suggested Repository Structure
-
-```
-project-name/
+```text
+smart-mcq-solver-challenge/
 │
-├── notebooks/
-│   ├── milestone-1.ipynb
-│   ├── milestone-2.ipynb
-│   └── final_notebook.ipynb
+├── data/                  # Raw and processed train/test datasets
+│   ├── train.csv
+│   └── test.csv
 │
-├── src/
-│   ├── train.py
-│   ├── inference.py
-│   └── utils.py
+├── notebooks/             # Jupyter/Kaggle/Colab notebooks for EDA & prototyping
+│   └── exploration_and_training.ipynb
 │
-├── reports/
-│   ├── milestone-1-report.pdf
-│   ├── milestone-2-report.pdf
-│   └── final-report.pdf
+├── scripts/               # Production-ready Python scripts for modular pipeline execution
+│   ├── __init__.py
+│   ├── data_loader.py     # Preprocessing and tokenization utils
+│   ├── model.py           # Multiple-Choice model definitions
+│   └── evaluate.py        # MAP@3 calculation and validation scripts
 │
-├── models/
+├── submissions/           # Generated submission files ready for Kaggle upload
+│   └── submission.csv
 │
-├── requirements.txt
-└── README.md
-```
-
----
-
-## Best Practices
-
-- Commit frequently with meaningful messages  
-- Keep milestone code reproducible  
-- Avoid committing unnecessary large files  
-- Use `.gitignore` properly  
-- Maintain a clean and structured repository  
-
----
-
-## Commit Message Guidelines
-
-### Good Example
-
-```
-Milestone 2: Implemented feature engineering and baseline model
-```
-
-### Poor Examples
-
-```
-update
-changes
-final
-```
-
----
-
-## Evaluation Criteria
-
-Your grading will consider:
-
-- Proper branch usage  
-- Clear milestone separation  
-- Code organization  
-- Reproducibility  
-- Professional Git practices  
-
-Failure to follow the branching policy may result in grade deductions.
-
----
-
-## Final Note
-
-This workflow mirrors real-world industry development practices.
-
-By following it properly, you demonstrate:
-
-- Ownership  
-- Engineering maturity  
-- Clean project tracking  
-- Professional development standards  
-
-If you have any doubts, clarify before proceeding.
+├── requirements.txt       # Environment dependencies
+└── README.md              # Project documentation
