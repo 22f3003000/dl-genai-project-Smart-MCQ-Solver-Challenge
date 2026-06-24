@@ -2,8 +2,8 @@
 
 An intelligent multiple-choice question-answering system developed for the Kaggle challenge. This system leverages advanced Natural Language Processing (NLP), Large Language Models (LLMs), and strategic answer ranking to predict and rank the top three most probable correct answers for complex multiple-choice questions.
 
-**Author:** [Debmalya Sanyal]  
-**Student/Participant ID:** [22f3003000]  
+**Author:** Debmalya Sanyal
+**Student/Participant ID:** 22f3003000 
 
 ---
 
