@@ -1,0 +1,275 @@
+# ==============================================================================
+# PROD STEP 1: ENVIRONMENT & ENVIRONMENT STABILITY PREPARATION
+# ==============================================================================
+print("Initializing Environment and installing dependencies...")
+!pip install -q transformers datasets accelerate scikit-learn pandas numpy torch
+
+import os
+import gc
+import torch
+import numpy as np
+import pandas as pd
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+from torch.optim import AdamW 
+from transformers import AutoTokenizer, AutoModelForMultipleChoice, get_linear_schedule_with_warmup
+from sklearn.model_selection import StratifiedKFold
+from tqdm.auto import tqdm
+
+# Guarantee exact seed synchronization across environments
+def seed_everything(seed=42):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+seed_everything()
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Executing pipeline natively on device: {device}")
+
+# ==============================================================================
+# PROD STEP 2: OPTIMIZED KAGGLER CONFIGURATION PROFILE
+# ==============================================================================
+class Config:
+    MODEL_NAME = "microsoft/deberta-v3-base"  # Golden-standard model for Reasoning benchmarks
+    MAX_LENGTH = 256                         # Strategic balanced chunk mapping window
+    BATCH_SIZE = 4                            # Optimizes VRAM ceilings to avoid CUDA OOMs
+    GRAD_ACCUM_STEPS = 4                      # Simulates a stable global batch size of 16 (4x4)
+    EPOCHS = 4                                # Gives model sufficient steps to extract feature depth
+    LR = 1.5e-5                               # Perfect alpha scaling convergence rate for DeBERTa-base
+    NUM_CHOICES = 5
+    N_FOLDS = 5                               # Strict Cross-Validation target boundaries
+    CHOICE_MAPPING = {'A': 0, 'B': 1, 'C': 2, 'D': 3, 'E': 4}
+    INV_CHOICE_MAPPING = {0: 'A', 1: 'B', 2: 'C', 3: 'D', 4: 'E'}
+
+# ==============================================================================
+# PROD STEP 3: MEAN AVERAGE PRECISION AT 3 (MAP@3) MONITORING METRIC
+# ==============================================================================
+def map_at_3(predictions, targets):
+    """ Calculates exact competition MAP@3 target weights """
+    scores = []
+    for preds, target in zip(predictions, targets):
+        score = 0.0
+        for i, pred in enumerate(preds[:3]):
+            if pred == target:
+                score = 1.0 / (i + 1)
+                break
+        scores.append(score)
+    return np.mean(scores)
+
+# ==============================================================================
+# PROD STEP 4: PREPROCESSING & STRATIFIED FOLD DIVISION
+# ==============================================================================
+print("\nIngesting Data from Kaggle input paths...")
+TRAIN_PATH = '/kaggle/input/competitions/smart-mcq-solver-challenge/train.csv'
+TEST_PATH = '/kaggle/input/competitions/smart-mcq-solver-challenge/test.csv'
+
+df_train_full = pd.read_csv(TRAIN_PATH)
+df_test = pd.read_csv(TEST_PATH)
+
+# Clean null/empty values to isolate tokenizer parsing models from corrupt input arrays
+for col in ['prompt', 'A', 'B', 'C', 'D', 'E']:
+    df_train_full[col] = df_train_full[col].fillna("").astype(str)
+    if col in df_test.columns:
+        df_test[col] = df_test[col].fillna("").astype(str)
+
+# Map target distributions flawlessly across folds
+df_train_full['fold'] = -1
+skf = StratifiedKFold(n_splits=Config.N_FOLDS, shuffle=True, random_state=42)
+for fold, (train_idx, val_idx) in enumerate(skf.split(df_train_full, df_train_full['answer'])):
+    df_train_full.loc[val_idx, 'fold'] = fold
+
+print(f"Train profile shape: {df_train_full.shape} | Cross-Validated Split complete.")
+
+# ==============================================================================
+# PROD STEP 5: CUSTOM MULTIPLE-CHOICE PYTORCH TEXT DATASET
+# ==============================================================================
+class MCQDataset(Dataset):
+    def __init__(self, df, tokenizer, max_length, is_test=False):
+        self.df = df.reset_index(drop=True)
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.is_test = is_test
+        self.options = ['A', 'B', 'C', 'D', 'E']
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+        prompt = row['prompt']
+        
+        # Concat context mapping structure pairs: [Prompt, Context Option Text]
+        first_sentences = [prompt] * Config.NUM_CHOICES
+        second_sentences = [str(row[opt]) for opt in self.options]
+        
+        encoded_inputs = self.tokenizer(
+            first_sentences,
+            second_sentences,
+            padding="max_length",
+            truncation=True,
+            max_length=self.max_length,
+            return_tensors="pt"
+        )
+        
+        item = {key: val.squeeze(0) for key, val in encoded_inputs.items()}
+        if not self.is_test:
+            item['labels'] = torch.tensor(Config.CHOICE_MAPPING[row['answer']], dtype=torch.long)
+            
+        return item
+
+# Initialize Tokenizer and Production Target Test Dataloader
+tokenizer = AutoTokenizer.from_pretrained(Config.MODEL_NAME)
+test_dataset = MCQDataset(df_test, tokenizer, Config.MAX_LENGTH, is_test=True)
+test_loader = DataLoader(test_dataset, batch_size=Config.BATCH_SIZE, shuffle=False, num_workers=2)
+
+# ==============================================================================
+# PROD STEP 6: ROBUST OOF ENSEMBLE TRAINING & CONVERGENCE LOOP
+# ==============================================================================
+# Empty array canvases to lock probabilities from every model execution phase
+all_test_probabilities = np.zeros((len(df_test), Config.NUM_CHOICES))
+oof_predictions = np.zeros((len(df_train_full), Config.NUM_CHOICES))
+
+for fold in range(Config.N_FOLDS):
+    print(f"\n======== EXECUTION LOOP: STARTING CROSS-VALIDATION FOLD {fold} ========")
+    
+    train_data = df_train_full[df_train_full['fold'] != fold].reset_index(drop=True)
+    val_data = df_train_full[df_train_full['fold'] == fold].reset_index(drop=True)
+    
+    train_ds = MCQDataset(train_data, tokenizer, Config.MAX_LENGTH)
+    val_ds = MCQDataset(val_data, tokenizer, Config.MAX_LENGTH)
+    
+    train_loader = DataLoader(train_ds, batch_size=Config.BATCH_SIZE, shuffle=True, num_workers=2)
+    val_loader = DataLoader(val_ds, batch_size=Config.BATCH_SIZE, shuffle=False, num_workers=2)
+    
+    # Initialize a clean, fresh architectural weight tree per CV Fold block
+    model = AutoModelForMultipleChoice.from_pretrained(Config.MODEL_NAME)
+    model.to(device)
+    
+    # Crucial Stability fix: Native epsilon parameter locked at 1e-6 to bypass DeBERTa zero-division NaNs
+    optimizer = AdamW(model.parameters(), lr=Config.LR, weight_decay=0.01, eps=1e-6)
+    
+    total_steps = (len(train_loader) // Config.GRAD_ACCUM_STEPS) * Config.EPOCHS
+    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=int(0.1 * total_steps), num_training_steps=total_steps)
+    
+    best_val_map3 = 0.0
+    
+    for epoch in range(Config.EPOCHS):
+        model.train()
+        train_loss = 0
+        optimizer.zero_grad() # Clean global backpropagation tracking tree
+        
+        for step, batch in enumerate(tqdm(train_loader, desc=f"Training Fold {fold} | Epoch {epoch+1}")):
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            labels = batch['labels'].to(device)
+            
+            # Enforce safe native standard FP32 execution blocks to prevent attention head numerical divergence
+            with torch.amp.autocast('cuda', enabled=False):
+                token_type_ids = batch.get('token_type_ids')
+                if token_type_ids is not None:
+                    outputs = model(input_ids=input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids.to(device), labels=labels)
+                else:
+                    outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+                    
+                loss = outputs.loss / Config.GRAD_ACCUM_STEPS
+            
+            # Escape route to drop step calculations gracefully if infinite weights manifest
+            if torch.isnan(loss):
+                continue
+                
+            train_loss += loss.item() * Config.GRAD_ACCUM_STEPS
+            loss.backward()
+            
+            # Step execution checkpoint boundaries under Gradient Accumulation constraints
+            if (step + 1) % Config.GRAD_ACCUM_STEPS == 0 or (step + 1) == len(train_loader):
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+            
+        # Local Validation Tracking Profile
+        model.eval()
+        val_preds_logits = []
+        val_targets = []
+        
+        with torch.no_grad():
+            for batch in val_loader:
+                input_ids = batch['input_ids'].to(device)
+                attention_mask = batch['attention_mask'].to(device)
+                labels = batch['labels']
+                
+                token_type_ids = batch.get('token_type_ids')
+                if token_type_ids is not None:
+                    outputs = model(input_ids=input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids.to(device))
+                else:
+                    outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+                    
+                val_preds_logits.append(outputs.logits.cpu().numpy())
+                for label in labels.numpy():
+                    val_targets.append(Config.INV_CHOICE_MAPPING[label])
+                    
+        val_preds_logits = np.vstack(val_preds_logits)
+        top_3_indices = np.argsort(-val_preds_logits, axis=1)[:, :3]
+        fold_string_preds = [[Config.INV_CHOICE_MAPPING[idx] for idx in sample] for sample in top_3_indices]
+        current_map3 = map_at_3(fold_string_preds, val_targets)
+        
+        print(f"--> [Summary] Fold {fold} | Epoch {epoch+1} | Val MAP@3: {current_map3:.4f} | Avg Loss: {train_loss/len(train_loader):.4f}")
+        
+        # Save checkpoints safely if the current epoch marks a validation improvement
+        if current_map3 > best_val_map3:
+            best_val_map3 = current_map3
+            torch.save(model.state_dict(), f"best_model_fold_{fold}.bin")
+            oof_predictions[df_train_full['fold'] == fold] = val_preds_logits
+
+    # --------------------------------------------------------------------------
+    # INFERENCE BLENDING MODULE
+    # --------------------------------------------------------------------------
+    print(f"Generating test predictions from fold {fold} checkpoint...")
+    model.load_state_dict(torch.load(f"best_model_fold_{fold}.bin"))
+    model.eval()
+    
+    fold_test_logits = []
+    with torch.no_grad():
+        for batch in test_loader:
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            
+            token_type_ids = batch.get('token_type_ids')
+            if token_type_ids is not None:
+                outputs = model(input_ids=input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids.to(device))
+            else:
+                outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+                
+            probs = torch.softmax(outputs.logits, dim=-1).cpu().numpy()
+            fold_test_logits.append(probs)
+            
+    all_test_probabilities += np.vstack(fold_test_logits) / Config.N_FOLDS
+    
+    # Active structural memory collection cleanup routines to protect GPU allocation boundaries
+    del model; gc.collect()
+    torch.cuda.empty_cache()
+
+# ==============================================================================
+# PROD STEP 7: MULTI-FOLD SUBMISSION BLENDING ASSEMBLY
+# ==============================================================================
+print("\nAggregating final ensembled predictions matrix maps...")
+final_test_indices = np.argsort(-all_test_probabilities, axis=1)[:, :3]
+
+submission_strings = []
+for row_indices in final_test_indices:
+    string_format = " ".join([Config.INV_CHOICE_MAPPING[idx] for idx in row_indices])
+    submission_strings.append(string_format)
+
+id_col = 'id' if 'id' in df_test.columns else 'ID'
+
+final_submission = pd.DataFrame({
+    'ID': df_test[id_col],
+    'Prediction': submission_strings
+})
+
+# Save output file cleanly to /kaggle/working directory
+final_submission.to_csv('submission.csv', index=False)
+print("\n========================= SYSTEM PROCESS SUCCESS =========================")
+print("submission.csv file created successfully!")
+print(final_submission.head(10))
