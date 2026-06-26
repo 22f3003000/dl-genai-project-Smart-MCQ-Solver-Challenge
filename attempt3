@@ -1,0 +1,120 @@
+# ==============================================================================
+# STEP 1: INITIALIZE ADVANCED HYBRID PACKAGES
+# ==============================================================================
+print("Initializing Multi-Stage Hybrid Retrieval Engine...")
+!pip install -q transformers sentence-transformers pandas numpy scikit-learn torch tqdm
+
+import os
+import gc
+import torch
+import pandas as pd
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from tqdm.auto import tqdm
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"System actively bound to Accelerator: {device}")
+
+# ==============================================================================
+# STEP 2: LOAD COMPETITION DATA
+# ==============================================================================
+TRAIN_PATH = '/kaggle/input/competitions/smart-mcq-solver-challenge/train.csv'
+TEST_PATH = '/kaggle/input/competitions/smart-mcq-solver-challenge/test.csv'
+
+df_train = pd.read_csv(TRAIN_PATH)
+df_test = pd.read_csv(TEST_PATH)
+
+# Clean missing string values to prevent vectorizer and embedding drops
+for col in ['prompt', 'A', 'B', 'C', 'D', 'E']:
+    df_train[col] = df_train[col].fillna("").astype(str)
+    if col in df_test.columns:
+        df_test[col] = df_test[col].fillna("").astype(str)
+
+# ==============================================================================
+# STEP 3: PREPARE LEXICAL MAPPING (TF-IDF)
+# ==============================================================================
+print("Building lexical keyword matrix...")
+unioned_corpus = []
+for df in [df_train, df_test]:
+    for col in ['prompt', 'A', 'B', 'C', 'D', 'E']:
+        unioned_corpus.extend(df[col].tolist())
+
+# Capture single words and word pairs (bigrams) while ignoring common stop words
+tfidf = TfidfVectorizer(stop_words='english', ngram_range=(1, 2))
+tfidf.fit(unioned_corpus)
+
+# ==============================================================================
+# STEP 4: LOAD HIGH-PERFORMANCE SEMANTIC BACKBONE
+# ==============================================================================
+# 'bge-small-en-v1.5' is currently one of the top-ranked models for retrieval/similarity
+print("Loading top-tier semantic mapping model...")
+semantic_model = SentenceTransformer('BAAI/bge-small-en-v1.5')
+semantic_model.to(device)
+
+# ==============================================================================
+# STEP 5: HYBRID EXECUTION MATRIX LOOP
+# ==============================================================================
+options_list = ['A', 'B', 'C', 'D', 'E']
+final_predictions = []
+
+# Blending weights: 70% Semantic Meaning + 30% Exact Keyword Matches
+SEMANTIC_WEIGHT = 0.70
+LEXICAL_WEIGHT = 0.30
+
+print(f"Executing hybrid ensemble sorting over {len(df_test)} test rows...")
+for idx, row in tqdm(df_test.iterrows(), total=len(df_test)):
+    prompt_text = row['prompt']
+    options_text = [row[opt] for opt in options_list]
+    
+    # --- Part A: Compute Lexical (TF-IDF) Scores ---
+    p_tfidf = tfidf.transform([prompt_text])
+    lexical_scores = []
+    for opt_text in options_text:
+        o_tfidf = tfidf.transform([opt_text])
+        sim = cosine_similarity(p_tfidf, o_tfidf)[0][0]
+        lexical_scores.append(sim)
+        
+    # --- Part B: Compute Semantic Scores ---
+    # BGE models require a short query instruction prefix for maximum accuracy
+    instructed_prompt = f"Represent this sentence for searching relevant passages: {prompt_text}"
+    
+    with torch.no_grad():
+        prompt_vector = semantic_model.encode(instructed_prompt, convert_to_numpy=True).reshape(1, -1)
+        options_vectors = semantic_model.encode(options_text, convert_to_numpy=True)
+        
+    semantic_scores = []
+    for i in range(len(options_list)):
+        opt_vector = options_vectors[i].reshape(1, -1)
+        sim = cosine_similarity(prompt_vector, opt_vector)[0][0]
+        semantic_scores.append(sim)
+        
+    # --- Part C: Linear Rank Fusion ---
+    row_hybrid_scores = []
+    for i, opt in enumerate(options_list):
+        # Blend the normalized scores together
+        hybrid_score = (SEMANTIC_WEIGHT * semantic_scores[i]) + (LEXICAL_WEIGHT * lexical_scores[i])
+        row_hybrid_scores.append((opt, hybrid_score))
+        
+    # Sort options strictly by their combined hybrid score descending
+    row_hybrid_scores.sort(key=lambda x: x[1], reverse=True)
+    
+    # Extract the top 3 best matching options
+    top_3_choices = [item[0] for item in row_hybrid_scores[:3]]
+    final_predictions.append(" ".join(top_3_choices))
+
+# ==============================================================================
+# STEP 6: CLEAN SUBMISSION FILE EXPORT
+# ==============================================================================
+id_column_name = 'id' if 'id' in df_test.columns else 'ID'
+
+submission_df = pd.DataFrame({
+    'ID': df_test[id_column_name],
+    'Prediction': final_predictions
+})
+
+submission_df.to_csv('submission.csv', index=False)
+print("\n======================= HYBRID ENGINE SUCCESS =======================")
+print("submission.csv successfully generated via Hybrid Fusion rules.")
+print(submission_df.head(15))
