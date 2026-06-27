@@ -1,7 +1,7 @@
 # ==============================================================================
-# STEP 1: INITIALIZE ADVANCED HYBRID PACKAGES
+# STEP 1: INITIALIZE STABLE HYBRID PACKAGES
 # ==============================================================================
-print("Initializing Enhanced V8 Multi-Stage Retrieval Engine...")
+print("Initializing Enhanced V13 Production Retrieval Engine...")
 !pip install -q transformers sentence-transformers pandas numpy scikit-learn torch tqdm
 
 import os
@@ -15,7 +15,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from tqdm.auto import tqdm
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"System actively bound to GPU T4 Accelerator: {device}")
+print(f"System actively bound to GPU Accelerator: {device}")
 
 # ==============================================================================
 # STEP 2: LOAD COMPETITION DATASET
@@ -33,36 +33,38 @@ for col in ['prompt', 'A', 'B', 'C', 'D', 'E']:
         df_test[col] = df_test[col].fillna("").astype(str)
 
 # ==============================================================================
-# STEP 3: PREPARE LEXICAL MAPPING (TF-IDF)
+# STEP 3: RESTORE V11 LEXICAL MAPPING (STANDARD TF-IDF)
 # ==============================================================================
-print("Building lexical keyword matrix...")
+print("Building stable lexical keyword matrix...")
 unioned_corpus = []
 for df in [df_train, df_test]:
     for col in ['prompt', 'A', 'B', 'C', 'D', 'E']:
         unioned_corpus.extend(df[col].tolist())
 
-# Captures single words and sequential word pairs while removing noise words
-tfidf = TfidfVectorizer(stop_words='english', ngram_range=(1, 2))
+# RESTORED: sublinear_tf is set to False to bring back exact keyword match intensity
+tfidf = TfidfVectorizer(stop_words='english', ngram_range=(1, 2), sublinear_tf=False)
 tfidf.fit(unioned_corpus)
 
 # ==============================================================================
-# STEP 4: LOAD HIGH-PERFORMANCE BGE SEMANTIC BACKBONE (FROM V8)
+# STEP 4: RESTORE V11 SEMANTIC BACKBONE
 # ==============================================================================
 print("Loading high-performance BGE semantic mapping model...")
+# RESTORED: Re-locking 'bge-small-en-v1.5' to perfectly align with your V11 foundation
 semantic_model = SentenceTransformer('BAAI/bge-small-en-v1.5')
 semantic_model.to(device)
 
 # ==============================================================================
-# STEP 5: HYBRID EXECUTION MATRIX WITH SCORE NORMALIZATION
+# STEP 5: HYBRID EXECUTION LOOP WITH NON-LINEAR SEPARATION BOOST
 # ==============================================================================
 options_list = ['A', 'B', 'C', 'D', 'E']
 final_predictions = []
 
-# Calibrated blending ratios: 65% Normalized Semantic Meaning + 35% Normalized Keywords
+# Retaining your highly optimized V11 structural weights
 SEMANTIC_WEIGHT = 0.65
 LEXICAL_WEIGHT = 0.35
+GAMMA = 2.0  # UPGRADE: Exponential scaling power factor to sharpen top choices
 
-print(f"Executing enhanced hybrid ensemble sorting over {len(df_test)} test rows...")
+print(f"Executing normalized hybrid ensemble sorting over {len(df_test)} test rows...")
 for idx, row in tqdm(df_test.iterrows(), total=len(df_test)):
     prompt_text = row['prompt']
     options_text = [row[opt] for opt in options_list]
@@ -75,7 +77,7 @@ for idx, row in tqdm(df_test.iterrows(), total=len(df_test)):
         sim = cosine_similarity(p_tfidf, o_tfidf)[0][0]
         lexical_scores.append(sim)
     
-    # UPGRADE: Normalize lexical scores to a perfect 0.0 - 1.0 range for this row
+    # Standardize lexical scores to a perfect 0.0 - 1.0 range
     lexical_scores = np.array(lexical_scores)
     lex_min, lex_max = lexical_scores.min(), lexical_scores.max()
     if lex_max > lex_min:
@@ -84,7 +86,6 @@ for idx, row in tqdm(df_test.iterrows(), total=len(df_test)):
         norm_lexical = np.zeros_like(lexical_scores)
         
     # --- Part B: Compute Semantic (BGE) Scores ---
-    # Force BGE asymmetric query mapping behavior using the official instruction prefix
     instructed_prompt = f"Represent this sentence for searching relevant passages: {prompt_text}"
     
     with torch.no_grad():
@@ -97,7 +98,7 @@ for idx, row in tqdm(df_test.iterrows(), total=len(df_test)):
         sim = cosine_similarity(prompt_vector, opt_vector)[0][0]
         semantic_scores.append(sim)
         
-    # UPGRADE: Normalize semantic scores to a perfect 0.0 - 1.0 range for this row
+    # Standardize semantic scores to a perfect 0.0 - 1.0 range
     semantic_scores = np.array(semantic_scores)
     sem_min, sem_max = semantic_scores.min(), semantic_scores.max()
     if sem_max > sem_min:
@@ -105,14 +106,17 @@ for idx, row in tqdm(df_test.iterrows(), total=len(df_test)):
     else:
         norm_semantic = np.zeros_like(semantic_scores)
         
-    # --- Part C: Normalized Linear Score Fusion Blending ---
+    # UPGRADE: Apply exponential scaling to widen the gap between high and low confidence picks
+    boosted_semantic = np.power(norm_semantic, GAMMA)
+        
+    # --- Part C: Normalized Score Fusion Blending ---
     row_hybrid_scores = []
     for i, opt in enumerate(options_list):
-        # Blend the mathematically normalized scores together flawlessly
-        hybrid_score = (SEMANTIC_WEIGHT * norm_semantic[i]) + (LEXICAL_WEIGHT * norm_lexical[i])
+        # Blend the uncorrupted keyword match with the sharpened semantic pick
+        hybrid_score = (SEMANTIC_WEIGHT * boosted_semantic[i]) + (LEXICAL_WEIGHT * norm_lexical[i])
         row_hybrid_scores.append((opt, hybrid_score))
         
-    # Sort options strictly by their combined balanced hybrid score descending
+    # Sort choices strictly by their combined balanced hybrid score descending
     row_hybrid_scores.sort(key=lambda x: x[1], reverse=True)
     
     # Extract the top 3 best matching options
@@ -120,7 +124,7 @@ for idx, row in tqdm(df_test.iterrows(), total=len(df_test)):
     final_predictions.append(" ".join(top_3_choices))
 
 # ==============================================================================
-# STEP 6: CLEAN SUBMISSION FILE EXPORT
+# STEP 6: SUBMISSION CONVERSION EXPORT
 # ==============================================================================
 id_column_name = 'id' if 'id' in df_test.columns else 'ID'
 
@@ -130,6 +134,6 @@ submission_df = pd.DataFrame({
 })
 
 submission_df.to_csv('submission.csv', index=False)
-print("\n======================= HYBRID ENGINE SUCCESS =======================")
-print("submission.csv successfully generated via Normalized Enhanced V8 Hybrid Fusion rules.")
+print("\n======================= HYBRID ENGINE V13 SUCCESS =======================")
+print("submission.csv successfully generated via optimized parameters.")
 print(submission_df.head(15))
