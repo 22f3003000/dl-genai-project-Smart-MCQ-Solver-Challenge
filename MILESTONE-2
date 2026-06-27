@@ -1,0 +1,245 @@
+# ==============================================================================
+# 0. SETUP AND DATA PREPARATION
+# ==============================================================================
+print("Installing environment requirements...")
+!pip install -q transformers datasets sentence-transformers scikit-learn pandas numpy torch tqdm
+
+import torch
+import numpy as np
+import pandas as pd
+from datasets import Dataset
+from transformers import AutoTokenizer, AutoModel, pipeline
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from sentence_transformers import SentenceTransformer, util
+from tqdm.auto import tqdm
+
+# Ensure reproducibility across runs
+torch.manual_seed(42)
+np.random.seed(42)
+device = 0 if torch.cuda.is_available() else -1
+device_torch = "cuda" if torch.cuda.is_available() else "cpu"
+
+# Load data safely from Kaggle input path
+TRAIN_PATH = '/kaggle/input/competitions/smart-mcq-solver-challenge/train.csv'
+df_pandas = pd.read_csv(TRAIN_PATH)
+
+# Clean missing inputs in Pandas to guarantee robust string properties
+for col in ['prompt', 'A', 'B', 'C', 'D', 'E', 'answer']:
+    if col in df_pandas.columns:
+        df_pandas[col] = df_pandas[col].fillna("").astype(str)
+
+print(f"Data ingested. Total training records found: {len(df_pandas)}")
+print("\n" + "="*50 + "\nCOMPUTING MILESTONE TASK RESULTS\n" + "="*50)
+
+
+# ==============================================================================
+# TASK 1: HF DATASETS .map() CHARACTER LENGTH AT INDEX 51
+# ==============================================================================
+# Convert pandas dataframe straight into a Hugging Face Dataset object
+hf_dataset = Dataset.from_pandas(df_pandas)
+
+# Enforce clean Python strings strictly inside the HF dataset mapping to insulate tokenizers
+def clean_and_concatenate_text(example):
+    prompt_str = str(example['prompt']) if example['prompt'] is not None else ""
+    a_str = str(example['A']) if example['A'] is not None else ""
+    return {
+        "prompt": prompt_str,
+        "A": a_str,
+        "combined_text": f"{prompt_str} {a_str}"
+    }
+
+hf_dataset = hf_dataset.map(clean_and_concatenate_text)
+char_len_51 = len(hf_dataset[51]['combined_text'])
+print(f"[Task 1 Result] Exact character length of combined_text at index 51: {char_len_51}")
+
+
+# ==============================================================================
+# TASK 2 & 3: TOKENIZER VOCAB SIZE AND [SEP] ID
+# ==============================================================================
+bert_tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+vocab_size = bert_tokenizer.vocab_size
+sep_id = bert_tokenizer.sep_token_id
+
+print(f"[Task 2 Result] bert-base-uncased total vocab size: {vocab_size}")
+print(f"[Task 3 Result] ID assigned to [SEP] token: {sep_id}")
+
+
+# ==============================================================================
+# TASK 4: GEOMETRIC SHAPE OF RESULTING INPUT_IDS TENSOR
+# ==============================================================================
+# Extract clean list of native string instances
+clean_prompts_list = [str(x) for x in hf_dataset['prompt']]
+
+tokenized_prompts = bert_tokenizer(
+    clean_prompts_list,
+    padding='max_length',
+    truncation=True,
+    max_length=128,
+    return_tensors='pt'
+)
+input_ids_shape = list(tokenized_prompts['input_ids'].shape)
+print(f"[Task 4 Result] Geometric shape of prompt input_ids tensor: {input_ids_shape}")
+
+
+# ==============================================================================
+# TASK 5: ATTENTION HEAD DIMENSIONALITY
+# ==============================================================================
+hidden_size = 768
+attention_heads = 12
+dim_per_head = hidden_size // attention_heads
+print(f"[Task 5 Result] Dimensionality of each individual attention head: {dim_per_head}")
+
+
+# ==============================================================================
+# TASK 6 & 7: LAST_HIDDEN_STATE SHAPE & CLS COMPONENT SUM AT ROW 0
+# ==============================================================================
+bert_model = AutoModel.from_pretrained("bert-base-uncased").to(device_torch)
+bert_model.eval()
+
+row_0_tokens = bert_tokenizer(str(hf_dataset[0]['prompt']), return_tensors='pt').to(device_torch)
+
+with torch.no_grad():
+    model_output = bert_model(**row_0_tokens)
+
+last_hidden_state = model_output.last_hidden_state
+lhs_shape = list(last_hidden_state.shape)
+print(f"[Task 6 Result] Exact shape of last_hidden_state tensor: {lhs_shape}")
+
+cls_vector = last_hidden_state[0, 0, :].cpu().numpy()
+cls_sum_first_5 = round(float(np.sum(cls_vector[:5])), 4)
+print(f"[Task 7 Result] Sum of first 5 float values in [CLS] vector: {cls_sum_first_5:.4f}")
+
+
+# ==============================================================================
+# TASK 8: ATTENTION LAYER MATRIX EXTRACTION
+# ==============================================================================
+bert_attn_model = AutoModel.from_pretrained("bert-base-uncased", output_attentions=True).to(device_torch)
+bert_attn_model.eval()
+
+target_str = "Light-ion fusion is a technique."
+text_tokens = bert_tokenizer(target_str, return_tensors='pt').to(device_torch)
+
+token_list = bert_tokenizer.convert_ids_to_tokens(text_tokens['input_ids'][0])
+fusion_index = token_list.index("fusion")
+
+with torch.no_grad():
+    attn_output = bert_attn_model(**text_tokens)
+
+last_layer_attn = attn_output.attentions[-1]
+attn_weight = round(float(last_layer_attn[0, 0, 0, fusion_index].cpu().item()), 4)
+
+print(f"[Task 8 Result] Attention weight from [CLS] to 'fusion': {attn_weight:.4f}")
+
+
+# ==============================================================================
+# TASK 9: SENTENCE-TRANSFORMERS COSINE SIMILARITY AT ROW 0
+# ==============================================================================
+st_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+prompt_emb = st_model.encode(str(hf_dataset[0]['prompt']), convert_to_tensor=True)
+opt_b_emb = st_model.encode(str(hf_dataset[0]['B']), convert_to_tensor=True)
+
+sim_score = round(float(util.cos_sim(prompt_emb, opt_b_emb).item()), 4)
+print(f"[Task 9 Result] Cosine similarity between prompt and Option B for Row ID 0: {sim_score:.4f}")
+
+
+# ==============================================================================
+# TASK 10: TF-IDF VS ALL-MINILM-L6-V2 PIPELINE COMPARISON
+# ==============================================================================
+def calculate_map3(preds, targets):
+    scores = []
+    for p, t in zip(preds, targets):
+        score = 0.0
+        for i, guess in enumerate(p[:3]):
+            if guess == t:
+                score = 1.0 / (i + 1)
+                break
+        scores.append(score)
+    return np.mean(scores)
+
+options_letters = ['A', 'B', 'C', 'D', 'E']
+targets = df_pandas['answer'].tolist()
+
+# --- Pipeline 1: TF-IDF Baseline ---
+corpus = []
+for idx, row in df_pandas.iterrows():
+    corpus.extend([str(row['prompt']), str(row['A']), str(row['B']), str(row['C']), str(row['D']), str(row['E'])])
+tfidf_vec = TfidfVectorizer(stop_words='english')
+tfidf_vec.fit(corpus)
+
+tfidf_top3_preds = []
+for idx, row in df_pandas.iterrows():
+    p_v = tfidf_vec.transform([str(row['prompt'])])
+    scores = [cosine_similarity(p_v, tfidf_vec.transform([str(row[o])]))[0][0] for o in options_letters]
+    ranked_indices = np.argsort(-np.array(scores))[:3]
+    tfidf_top3_preds.append([options_letters[i] for i in ranked_indices])
+
+# --- Pipeline 2: Sentence-Transformers Embedding Pipeline ---
+minilm_top3_preds = []
+all_prompts = [str(x) for x in df_pandas['prompt'].tolist()]
+print("\nEncoding corpus with all-MiniLM-L6-v2...")
+prompt_embeddings = st_model.encode(all_prompts, convert_to_numpy=True, show_progress_bar=False)
+
+for idx, row in df_pandas.iterrows():
+    p_emb = prompt_embeddings[idx].reshape(1, -1)
+    opts_text = [str(row[o]) for o in options_letters]
+    opts_embeddings = st_model.encode(opts_text, convert_to_numpy=True, show_progress_bar=False)
+    
+    scores = [cosine_similarity(p_emb, opt_emb.reshape(1, -1))[0][0] for opt_emb in opts_embeddings]
+    ranked_indices = np.argsort(-np.array(scores))[:3]
+    minilm_top3_preds.append([options_letters[i] for i in ranked_indices])
+
+minilm_map3 = round(float(calculate_map3(minilm_top3_preds, targets)), 4)
+
+# Determine structural question containment swap count
+mismatch_containment_count = 0
+for idx in range(len(df_pandas)):
+    correct = targets[idx]
+    in_tfidf = correct in tfidf_top3_preds[idx]
+    in_minilm = correct in minilm_top3_preds[idx]
+    if (not in_tfidf) and in_minilm:
+        mismatch_containment_count += 1
+
+print(f"[Task 10 Result Part 1] Final MAP@3 score of all-MiniLM-L6-v2: {minilm_map3:.4f}")
+print(f"[Task 10 Result Part 2] Count of instances where target is only found in MiniLM Top-3: {mismatch_containment_count}")
+
+
+# ==============================================================================
+# TASK 11 & 12: ZERO-SHOT CLASSIFICATION PIPELINE ANALYSIS (SOFTMAX VS SIGMOID)
+# ==============================================================================
+zero_shot_engine = pipeline("zero-shot-classification", model="facebook/bart-large-mnli", device=device)
+
+prompt_row_1 = str(hf_dataset[1]['prompt'])
+candidate_opts = [str(hf_dataset[1]['A']), str(hf_dataset[1]['B']), str(hf_dataset[1]['C'])]
+
+# Run 1: Multi-class setup (Softmax)
+res_softmax = zero_shot_engine(prompt_row_1, candidate_labels=candidate_opts, multi_label=False)
+top_prob_softmax = round(float(res_softmax['scores'][0]), 4)
+sum_softmax = sum(res_softmax['scores'])
+
+# Run 2: Multi-label setup (Independent Sigmoids)
+res_sigmoid = zero_shot_engine(prompt_row_1, candidate_labels=candidate_opts, multi_label=True)
+sum_sigmoid = sum(res_sigmoid['scores'])
+
+abs_diff_sums = round(abs(sum_softmax - sum_sigmoid), 4)
+
+print(f"[Task 11 Result] Probability score given to the top-ranked option (Softmax): {top_prob_softmax:.4f}")
+print(f"[Task 12 Result] Absolute difference between Softmax sum and Sigmoid sum: {abs_diff_sums:.4f}")
+
+
+# ==============================================================================
+# TASK 13: GENERATIVE SLM VALUE PARSING
+# ==============================================================================
+# FIXED: Swapped 'text2text-generation' for standard registered 'text-generation' task name
+gen_pipeline = pipeline("text-generation", model="google/flan-t5-small", device=device)
+
+prompt_string = f"Question: {str(hf_dataset[0]['prompt'])}. Is the correct answer A: {str(hf_dataset[0]['A'])} or B: {str(hf_dataset[0]['B'])}? Answer with just the letter A or B."
+gen_output = gen_pipeline(prompt_string, max_new_tokens=5)
+extracted_text = gen_output[0]['generated_text'].strip()
+
+# Cleanup prompt text leakage if the text-generation wrapper echoes input sequences back
+if prompt_string in extracted_text:
+    extracted_text = extracted_text.replace(prompt_string, "").strip()
+
+print(f"[Task 13 Result] Exact generative string output returned by flan-t5-small: '{extracted_text}'")
+print("\n" + "="*50 + "\nALL MILESTONE EVALUATIONS COMPLETE\n" + "="*50)
