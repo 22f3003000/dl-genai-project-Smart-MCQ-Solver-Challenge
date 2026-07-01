@@ -1,0 +1,190 @@
+# ==============================================================================
+# STEP 1: DEEP HARDWARE RESET & CACHE SMASH
+# ==============================================================================
+print("Initializing Unsupervised Dual-Harvest Context Engine (V31)...")
+import sys
+import os
+import gc
+import torch
+
+if os.path.exists('submission.csv'):
+    try: os.remove('submission.csv')
+    except: pass
+
+gc.collect()
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
+
+!pip install -q transformers sentence-transformers pandas numpy scikit-learn tqdm
+
+import pandas as pd
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from tqdm.auto import tqdm
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"System actively bound to GPU Accelerator: {device}")
+
+# ==============================================================================
+# STEP 2: DATA INGESTION & GEOMETRY LOCK
+# ==============================================================================
+TRAIN_PATH = '/kaggle/input/competitions/smart-mcq-solver-challenge/train.csv'
+TEST_PATH = '/kaggle/input/competitions/smart-mcq-solver-challenge/test.csv'
+
+df_train = pd.read_csv(TRAIN_PATH)
+df_test = pd.read_csv(TEST_PATH)
+
+for col in ['prompt', 'A', 'B', 'C', 'D', 'E']:
+    df_train[col] = df_train[col].fillna("").astype(str)
+    if col in df_test.columns:
+        df_test[col] = df_test[col].fillna("").astype(str)
+
+# ==============================================================================
+# STEP 3: PREPARE LEXICAL MATRIX (UNTOUCHED WHOLE-WORD TOKENS)
+# ==============================================================================
+print("Building lexical frequency space...")
+unioned_corpus = []
+for df in [df_train, df_test]:
+    for col in ['prompt', 'A', 'B', 'C', 'D', 'E']:
+        unioned_corpus.extend(df[col].tolist())
+
+tfidf = TfidfVectorizer(stop_words='english', ngram_range=(1, 2), sublinear_tf=False)
+tfidf.fit(unioned_corpus)
+
+# ==============================================================================
+# STEP 4: LOAD HIGH-EXPRESSION SEMANTIC MODELS
+# ==============================================================================
+print("Loading Model A (BGE Small - Core Anchor)...")
+model_small = SentenceTransformer('BAAI/bge-small-en-v1.5').to(device)
+
+print("Loading Model B (BGE Large - Context Retrieval Booster)...")
+model_large = SentenceTransformer('BAAI/bge-large-en-v1.5').to(device)
+
+model_small.eval()
+model_large.eval()
+
+# ==============================================================================
+# STEP 5: PRE-COMPUTE BACKGROUND KNOWLEDGE BANKS
+# ==============================================================================
+print("Building background knowledge-base tracks from Train corpus...")
+train_knowledge_texts = []
+for _, row in df_train.iterrows():
+    correct_ans_letter = row.get('answer', 'A')
+    correct_ans_text = row.get(correct_ans_letter, '')
+    train_knowledge_texts.append(f"{row['prompt']} {correct_ans_text}")
+
+# Vectorize knowledge base using the large semantic encoder
+with torch.no_grad():
+    knowledge_embeddings = model_large.encode(train_knowledge_texts, convert_to_numpy=True, show_progress_bar=True)
+
+# Pre-vectorize the knowledge base for fast lexical context matching
+knowledge_tfidf = tfidf.transform(train_knowledge_texts)
+
+# ==============================================================================
+# STEP 6: DUAL-CONTEXT INFORMED RETRIEVAL LOOP
+# ==============================================================================
+options_list = ['A', 'B', 'C', 'D', 'E']
+final_predictions = []
+
+W_LARGE = 0.45
+W_SMALL = 0.30
+W_LEXICAL = 0.25
+GAMMA = 2.0  
+
+print(f"\nExecuting dual-context tracking over {len(df_test)} records...")
+for idx, row in tqdm(df_test.iterrows(), total=len(df_test)):
+    prompt_text = row['prompt']
+    options_text = [row[opt] for opt in options_list]
+    
+    # --- Pass 1: Harvest Best Semantic Context (BGE Large) ---
+    instructed_prompt = f"Represent this sentence for searching relevant passages: {prompt_text}"
+    with torch.no_grad():
+        test_prompt_vector = model_large.encode(instructed_prompt, convert_to_numpy=True).reshape(1, -1)
+    
+    semantic_sims = cosine_similarity(test_prompt_vector, knowledge_embeddings)[0]
+    best_semantic_idx = np.argmax(semantic_sims)
+    context_semantic = train_knowledge_texts[best_semantic_idx]
+    
+    # --- Pass 2: Harvest Best Lexical Context (TF-IDF Keyword Overlap) ---
+    p_tfidf_raw = tfidf.transform([prompt_text])
+    lexical_sims = cosine_similarity(p_tfidf_raw, knowledge_tfidf)[0]
+    best_lexical_idx = np.argmax(lexical_sims)
+    context_lexical = train_knowledge_texts[best_lexical_idx]
+    
+    # --- Part B: Build Enhanced Multi-Anchor Prompt Text ---
+    # Combine the semantic anchor and lexical anchor context layers
+    if best_semantic_idx == best_lexical_idx:
+        enriched_prompt_text = f"Context: {context_semantic} Question: {prompt_text}"
+    else:
+        enriched_prompt_text = f"Context A: {context_semantic} Context B: {context_lexical} Question: {prompt_text}"
+        
+    enriched_instructed_prompt = f"Represent this sentence for searching relevant passages: {enriched_prompt_text}"
+    
+    # --- Part C: Compute Upgraded Lexical Scores ---
+    p_tfidf = tfidf.transform([enriched_prompt_text])
+    lexical_scores = []
+    for opt_text in options_text:
+        o_tfidf = tfidf.transform([opt_text])
+        lexical_scores.append(cosine_similarity(p_tfidf, o_tfidf)[0][0])
+        
+    lexical_scores = np.array(lexical_scores)
+    l_min, l_max = lexical_scores.min(), lexical_scores.max()
+    norm_lexical = (lexical_scores - l_min) / (l_max - l_min) if l_max > l_min else np.zeros_like(lexical_scores)
+    
+    # --- Part D: Compute Model A (BGE Small) Similarities ---
+    with torch.no_grad():
+        p_vec_small = model_small.encode(enriched_instructed_prompt, convert_to_numpy=True).reshape(1, -1)
+        o_vecs_small = model_small.encode(options_text, convert_to_numpy=True)
+        
+    small_scores = []
+    for i in range(len(options_list)):
+        small_scores.append(cosine_similarity(p_vec_small, o_vecs_small[i].reshape(1, -1))[0][0])
+        
+    small_scores = np.array(small_scores)
+    s_min, s_max = small_scores.min(), small_scores.max()
+    norm_small = (small_scores - s_min) / (s_max - s_min) if s_max > s_min else np.zeros_like(small_scores)
+    boosted_small = np.power(norm_small, GAMMA)
+    
+    # --- Part E: Compute Model B (BGE Large) Similarities ---
+    with torch.no_grad():
+        p_vec_large = model_large.encode(enriched_instructed_prompt, convert_to_numpy=True).reshape(1, -1)
+        o_vecs_large = model_large.encode(options_text, convert_to_numpy=True)
+        
+    large_scores = []
+    for i in range(len(options_list)):
+        large_scores.append(cosine_similarity(p_vec_large, o_vecs_large[i].reshape(1, -1))[0][0])
+        
+    large_scores = np.array(large_scores)
+    la_min, la_max = large_scores.min(), large_scores.max()
+    norm_large = (large_scores - la_min) / (la_max - la_min) if la_max > la_min else np.zeros_like(large_scores)
+    boosted_large = np.power(norm_large, GAMMA)
+    
+    # --- Part F: Pure Continuous Matrix Blending ---
+    row_hybrid_scores = []
+    for i, opt in enumerate(options_list):
+        hybrid_score = (
+            (W_LARGE * boosted_large[i]) +
+            (W_SMALL * boosted_small[i]) +
+            (W_LEXICAL * norm_lexical[i])
+        )
+        row_hybrid_scores.append((opt, hybrid_score))
+        
+    row_hybrid_scores.sort(key=lambda x: x[1], reverse=True)
+    top_3_choices = [item[0] for item in row_hybrid_scores[:3]]
+    final_predictions.append(" ".join(top_3_choices))
+
+# ==============================================================================
+# STEP 7: EXPORT CLEAN PRODUCTION FILE
+# ==============================================================================
+id_column_name = 'id' if 'id' in df_test.columns else 'ID'
+
+submission_df = pd.DataFrame({
+    'ID': df_test[id_column_name],
+    'Prediction': final_predictions
+})
+
+submission_df.to_csv('submission.csv', index=False)
+print("\n======================= V31 DUAL-CONTEXT ENGINE COMPLETE =======================")
+print(submission_df.head(15))
